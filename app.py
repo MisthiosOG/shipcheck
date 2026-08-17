@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, field_validator
 from playwright.async_api import async_playwright
 
@@ -289,6 +290,11 @@ async def api_monitors(authorization: str = Header(default="")):
         raise HTTPException(401, "invalid api key")
     return {"count": len(MONITORS), "urls": {u: {"ok": m["last_ok"], "status": m["last_status"]}
                                              for u, m in MONITORS.items()}}
+
+
+@app.get("/", response_class=HTMLResponse)
+async def landing():
+    return open(os.path.join(os.path.dirname(__file__), "landing.html"), encoding="utf-8").read()
 
 
 @app.get("/health")
