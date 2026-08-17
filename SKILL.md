@@ -21,7 +21,7 @@ curl -s -X POST "$SHIPCHECK_URL/check" \
   -d '{"url": "https://<deployed-url>", "screenshot": true}' | python -m json.tool
 ```
 
-Defaults: `SHIPCHECK_URL=https://shipcheck.up.railway.app` (override via env).
+Defaults: `SHIPCHECK_URL=https://shipcheck-production-5d2a.up.railway.app` (override via env).
 
 ## Report format
 
