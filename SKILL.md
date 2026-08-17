@@ -38,11 +38,19 @@ Read the JSON and report in this exact shape:
 
 If `ok` is false or errors exist, diagnose the first error and suggest the fix before anything else.
 
+## Handling failures
+
+- **403** — URL blocked (private IP / metadata endpoint / non-80/443 port). Do not retry; tell the user the URL is not a public web app.
+- **429** — free tier limit (3 checks/hour). Wait, or tell the user the limit and offer Pro.
+- **401** — bad/missing key.
+
 ## Local fallback (no API key / server down)
 
 ```bash
 python <skill-dir>/check.py https://<deployed-url>
 ```
+
+Same guards, same JSON output. Screenshot saved to `shipcheck-screenshot.jpg` in cwd.
 
 ## After the report
 
