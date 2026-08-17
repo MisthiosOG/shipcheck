@@ -1,6 +1,7 @@
 """shipcheck — post-deploy verification API.
 
 POST /check {url} -> {ok, status, title, errors, warnings, lcp_ms, screenshot}.
+POST /monitor {url, webhook} (Pro) -> hourly monitoring + webhook alerts on up/down.
 Guards baked in: SSRF (private/metadata/link-local IPs, ports 80/443 only, DNS pin
 against rebinding), hard 15s timeout, in-memory rate limit (3/hr/IP free), one JSON
 log line per request for usage accounting.
@@ -12,14 +13,14 @@ import json
 import os
 import socket
 import time
+import urllib.request
 from collections import deque
+from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, field_validator
 from playwright.async_api import async_playwright
-
-app = FastAPI(title="shipcheck")
 
 # ponytail: single shared key via env for MVP; per-user keys + Stripe metering when paying users exist
 API_KEY = os.environ.get("SHIPCHECK_API_KEY", "sk-test-123")
@@ -27,6 +28,8 @@ FREE_KEY = "sk-free-demo"
 HARD_TIMEOUT = 15           # seconds, hard ceiling per check (kills stuck pages)
 FREE_LIMIT_PER_HOUR = 3
 PAID_LIMIT_PER_HOUR = 60
+MONITOR_CAP = 20
+MONITOR_INTERVAL = int(os.environ.get("SHIPCHECK_INTERVAL", "3600"))  # seconds; lower for testing
 
 
 class SSRFError(ValueError):
@@ -84,6 +87,79 @@ class RateLimiter:
 
 
 RATE = RateLimiter()
+
+# --- 24/7 monitoring (Pro feature) ---
+# ponytail: in-memory store — monitor list resets on redeploy. Move to a JSON file /
+# Railway volume / DB once real paying users exist so their monitors survive deploys.
+MONITORS = {}  # url -> {"webhook": str, "last_ok": bool|None, "last_status": int|None}
+_monitor_task = None
+
+
+def _send_webhook(webhook: str, text: str):
+    """Fire-and-forget Discord webhook alert (blocks are cheap here)."""
+    try:
+        req = urllib.request.Request(
+            webhook, data=json.dumps({"content": text}).encode(),
+            headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        print(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                          "note": f"webhook_send_failed: {e}"}), flush=True)
+
+
+async def monitor_loop():
+    """Every MONITOR_INTERVAL seconds, check each monitored URL; alert webhook on state change."""
+    while True:
+        await asyncio.sleep(MONITOR_INTERVAL)
+        for url, m in list(MONITORS.items()):
+            try:
+                r = await check(url, screenshot=False, timeout=HARD_TIMEOUT)
+            except SSRFError:
+                continue
+            now_ok = bool(r["ok"])
+            prev_ok = m["last_ok"]
+            m["last_ok"], m["last_status"] = now_ok, r["status"]
+            _log(urlparse(url).hostname, now_ok, r["status"], "monitor", "pro", 0, "monitor")
+            if prev_ok is None:
+                continue  # first check after (re)start — establish baseline, no alert
+            if now_ok != prev_ok:
+                state = "✅ back UP" if now_ok else "🔴 is DOWN"
+                extra = "" if now_ok else f" — status {r['status']}, {r['errors'][:1]}"
+                _send_webhook(m["webhook"], f"shipcheck: `{url}` {state}{extra}")
+
+
+@asynccontextmanager
+async def lifespan(app):
+    global _monitor_task
+    _monitor_task = asyncio.create_task(monitor_loop())
+    yield
+    if _monitor_task:
+        _monitor_task.cancel()
+
+
+app = FastAPI(title="shipcheck", lifespan=lifespan)
+
+
+class MonitorRequest(BaseModel):
+    url: str
+    webhook: str
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        p = urlparse(v)
+        if p.scheme not in ("http", "https") or not p.netloc:
+            raise ValueError("url must be http(s) with a host")
+        return v
+
+    @field_validator("webhook")
+    @classmethod
+    def validate_webhook(cls, v: str) -> str:
+        # alerts only go to Discord webhooks — prevents turning shipcheck into a webhook spam relay
+        if not v.startswith("https://discord.com/api/webhooks/") and \
+           not v.startswith("https://discordapp.com/api/webhooks/"):
+            raise ValueError("webhook must be a Discord webhook URL")
+        return v
 
 
 async def _visit(url: str, host: str, pinned_ip: str, screenshot: bool, timeout: int) -> dict:
@@ -188,6 +264,31 @@ async def api_check(req: CheckRequest, request: Request, authorization: str = He
         raise HTTPException(403, f"blocked: {e}")
     _log(urlparse(req.url).hostname, result["ok"], result["status"], ip, tier, int((time.time() - t0) * 1000))
     return result
+
+
+@app.post("/monitor")
+async def api_monitor(req: MonitorRequest, authorization: str = Header(default="")):
+    """Pro-only: register a URL for hourly monitoring + Discord alerts on up/down."""
+    if authorization != f"Bearer {API_KEY}":
+        raise HTTPException(402, "monitoring is a Pro feature — get an API key at shipcheck.dev")
+    if len(MONITORS) >= MONITOR_CAP:
+        raise HTTPException(503, f"monitor capacity full ({MONITOR_CAP})")
+    try:
+        assert_safe_url(req.url)
+    except SSRFError as e:
+        raise HTTPException(403, f"blocked: {e}")
+    MONITORS[req.url] = {"webhook": req.webhook, "last_ok": None, "last_status": None}
+    _log(urlparse(req.url).hostname, True, 200, "?", "pro", 0, "monitor_registered")
+    return {"registered": req.url, "interval_seconds": MONITOR_INTERVAL,
+            "active_monitors": len(MONITORS)}
+
+
+@app.get("/monitors")
+async def api_monitors(authorization: str = Header(default="")):
+    if authorization != f"Bearer {API_KEY}":
+        raise HTTPException(401, "invalid api key")
+    return {"count": len(MONITORS), "urls": {u: {"ok": m["last_ok"], "status": m["last_status"]}
+                                             for u, m in MONITORS.items()}}
 
 
 @app.get("/health")

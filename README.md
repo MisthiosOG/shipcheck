@@ -26,13 +26,20 @@ After any deploy, the agent calls the check API and reports:
 ## API
 
 ```bash
+# one-off check
 curl -X POST https://shipcheck-production-5d2a.up.railway.app/check \
   -H "Authorization: Bearer $SHIPCHECK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://your-app.vercel.app"}'
+
+# Pro: 24/7 hourly monitoring + Discord alerts on down/recovery
+curl -X POST https://shipcheck-production-5d2a.up.railway.app/monitor \
+  -H "Authorization: Bearer $SHIPCHECK_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://your-app.vercel.app", "webhook": "https://discord.com/api/webhooks/..."}'
 ```
 
-Works with any URL — Vercel, Netlify, Railway, custom domains. Free tier available; `SHIPCHECK_API_KEY` required.
+Works with any URL — Vercel, Netlify, Railway, custom domains. Free tier: `sk-free-demo` (3 checks/hour). Pro key required for monitoring.
 
 ## Local mode (no API)
 
