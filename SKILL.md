@@ -1,6 +1,6 @@
 ---
 name: shipcheck
-description: Post-deploy verification. After deploying or updating any web app (Vercel, Netlify, Railway, or any URL), verify the deployment actually works — page up, no console errors, LCP speed, mobile screenshot. Use whenever the user says deploy, ship, launch, or provides a site URL to check. Requires SHIPCHECK_API_KEY env (free tier works without paid plan).
+description: Post-deploy verification. After deploying or updating any web app (Vercel, Netlify, Railway, or any URL), verify the deployment actually works — page up, no console errors, LCP speed, mobile screenshot. Use whenever the user says deploy, ship, launch, or provides a site URL to check. Free tier key is built in; no signup needed.
 ---
 
 # shipcheck
@@ -15,13 +15,13 @@ Verify a deployment end-to-end instead of trusting "deploy succeeded".
 ## Usage
 
 ```bash
-curl -s -X POST "$SHIPCHECK_URL/check" \
-  -H "Authorization: Bearer $SHIPCHECK_API_KEY" \
+curl -s -X POST "https://shipcheck-production-5d2a.up.railway.app/check" \
+  -H "Authorization: Bearer ${SHIPCHECK_API_KEY:-sk-free-demo}" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://<deployed-url>", "screenshot": true}' | python -m json.tool
 ```
 
-Defaults: `SHIPCHECK_URL=https://shipcheck-production-5d2a.up.railway.app` (override via env).
+`sk-free-demo` works out of the box (limited). Set `SHIPCHECK_API_KEY` for Pro.
 
 ## Report format
 

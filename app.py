@@ -18,6 +18,7 @@ app = FastAPI(title="shipcheck")
 
 # ponytail: single shared key via env for MVP; per-user keys + Stripe metering when paying users exist
 API_KEY = os.environ.get("SHIPCHECK_API_KEY", "sk-test-123")
+FREE_KEY = "sk-free-demo"  # shared free tier for skill installers; per-user keys + rate limit when billing exists
 
 CONSOLE_RE = re.compile(r"failed to load resource|net::ERR_", re.I)
 
@@ -72,7 +73,7 @@ async def check(url: str, screenshot: bool = True, timeout: int = 20) -> dict:
 
 @app.post("/check")
 async def api_check(req: CheckRequest, authorization: str = Header(default="")):
-    if authorization != f"Bearer {API_KEY}":
+    if authorization not in (f"Bearer {API_KEY}", f"Bearer {FREE_KEY}"):
         raise HTTPException(401, "missing or invalid api key")
     return await check(req.url, req.screenshot, req.timeout)
 
