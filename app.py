@@ -102,8 +102,14 @@ async def _visit(url: str, host: str, pinned_ip: str, screenshot: bool, timeout:
         ])
         try:
             page = await browser.new_page(viewport={"width": 390, "height": 844})
-            page.on("console", lambda m: errors.append(m.text) if m.type == "error"
-                    else warnings.append(m.text) if m.type == "warning" else None)
+
+            def _on_console(m):
+                if m.type in ("error", "warning"):
+                    loc = (m.location or {}).get("url", "")
+                    text = f"{m.text} @ {loc}" if loc else m.text  # name the failing resource, not just the symptom
+                    (errors if m.type == "error" else warnings).append(text)
+
+            page.on("console", _on_console)
             t0 = time.time()
             try:
                 resp = await page.goto(url, wait_until="load", timeout=timeout * 1000)
