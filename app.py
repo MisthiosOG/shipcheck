@@ -271,7 +271,7 @@ async def api_check(req: CheckRequest, request: Request, authorization: str = He
 async def api_monitor(req: MonitorRequest, authorization: str = Header(default="")):
     """Pro-only: register a URL for hourly monitoring + Discord alerts on up/down."""
     if authorization != f"Bearer {API_KEY}":
-        raise HTTPException(402, "monitoring is a Pro feature — get an API key at shipcheck.dev")
+        raise HTTPException(402, "monitoring is a Pro feature — get an API key at shipcheck-production-5d2a.up.railway.app")
     if len(MONITORS) >= MONITOR_CAP:
         raise HTTPException(503, f"monitor capacity full ({MONITOR_CAP})")
     try:
