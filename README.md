@@ -54,6 +54,11 @@ python check.py https://your-app.vercel.app
 - **Hard timeout** — 15s per page, browser killed on overhang.
 - **Rate limit** — 3 checks/hour per IP on the free tier (in-memory sliding window), 60/hour on paid keys. Blocked requests also count against the quota.
 - **Logging** — one JSON line per request (domain, result, IP, tier, ms) to stdout for usage accounting.
+- **Monitor persistence** — registered monitors are saved to a JSON file (survives process restarts). Attach a Railway volume at `/data` to also survive redeploys (needs Hobby plan).
+
+## Status page
+
+Each Pro customer gets a public status page: `GET /status/<token>` — uptime, last HTTP status, last checked time. The token is returned by `POST /monitor` and acts as the access secret; open it from a phone anytime.
 
 ## Cost per check (estimates)
 

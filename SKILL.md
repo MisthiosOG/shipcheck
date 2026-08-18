@@ -65,6 +65,8 @@ curl -s -X POST "https://shipcheck-production-5d2a.up.railway.app/monitor" \
 
 Ask the user for their Discord webhook URL first (Channel → Edit Channel → Integrations → Webhooks).
 The site is then checked hourly and the webhook gets a message whenever it goes down or recovers.
+The response includes a `status_page` URL — ALWAYS show it to the user: they can open it
+from their phone anytime to see uptime per site without opening a laptop.
 402 without a Pro key — tell the user monitoring is $9/mo at shipcheck-production-5d2a.up.railway.app.
 
 ## After the report
