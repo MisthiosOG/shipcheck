@@ -382,6 +382,50 @@ th {{ color:#8b8b96; font-weight:500 }} td {{ word-break:break-all }}
 {rows}</table></body></html>"""
 
 
+@app.post("/webhook/trakteer")
+async def webhook_trakteer(request: Request):
+    """Trakteer support webhook — capture-and-inspect for now.
+    ponytail: logs raw payload; parse + auto-issue Pro key once a real payload shape is seen."""
+    body = await request.body()
+    _log("trakteer", True, 200, "webhook", "pro", 0, f"payload={body.decode(errors='replace')[:1000]}")
+    return {"ok": True}
+
+
+@app.get("/pro", response_class=HTMLResponse)
+async def pro_page():
+    url = os.environ.get("SHIPCHECK_PAYMENT_URL", "")
+    label = os.environ.get("SHIPCHECK_PAYMENT_LABEL", "Subscribe")
+    price = os.environ.get("SHIPCHECK_PAYMENT_PRICE", "$9/month")
+    contact = os.environ.get("SHIPCHECK_CONTACT", "")
+    if url:
+        cta = f'<a class="btn btn-pro" href="{html.escape(url)}">{html.escape(label)} — {html.escape(price)}</a>'
+    else:
+        cta = '<p class="note">Payment coming soon — check back or DM for early access.</p>'
+    if contact:
+        contact_html = f'<p style="margin-top:24px;color:var(--dim)">After payment, DM <b>{html.escape(contact)}</b> for your Pro API key. Sent within 24h.</p>'
+    else:
+        contact_html = ""
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shipcheck Pro</title>
+<style>
+body {{ background:#0a0a0f; color:#e8e8ed; font:16px/1.6 system-ui,sans-serif; margin:0; padding:40px 20px; text-align:center }}
+h1 {{ font-size:1.8rem; font-weight:800 }} h1 em {{ color:#4ade80; font-style:normal }}
+p {{ color:#8b8b96; max-width:500px; margin:12px auto }}
+.btn {{ display:inline-block; padding:16px 36px; border-radius:12px; text-decoration:none; font-weight:700; font-size:1.05rem; margin-top:24px; transition:opacity .15s }}
+.btn:hover {{ opacity:.85 }}
+.btn-pro {{ background:#4ade80; color:#000 }}
+.note {{ color:#8b8b96; font-style:italic; margin-top:32px }}
+a {{ color:#4ade80 }}
+</style></head><body>
+<h1>shipcheck <em>Pro</em></h1>
+<p>24/7 monitoring — hourly checks + Discord alerts on down/recovery.<br>60 checks/hour. Status page you can open from your phone.</p>
+{cta}
+{contact_html}
+<p style="margin-top:40px"><a href="{PUBLIC_URL}">← back to shipcheck</a></p>
+</body></html>"""
+
+
 @app.get("/", response_class=HTMLResponse)
 async def landing():
     return open(os.path.join(os.path.dirname(__file__), "landing.html"), encoding="utf-8").read()
