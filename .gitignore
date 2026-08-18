@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 shipcheck-screenshot.jpg
 .venv/
+shipcheck_state.json

@@ -8,9 +8,11 @@ log line per request for usage accounting.
 """
 import asyncio
 import base64
+import html
 import ipaddress
 import json
 import os
+import secrets
 import socket
 import time
 import urllib.request
@@ -31,6 +33,12 @@ FREE_LIMIT_PER_HOUR = 3
 PAID_LIMIT_PER_HOUR = 60
 MONITOR_CAP = 20
 MONITOR_INTERVAL = int(os.environ.get("SHIPCHECK_INTERVAL", "3600"))  # seconds; lower for testing
+# ponytail: /data only persists if a Railway volume is attached (one-time); without it this
+# degrades to the container-local file (lost on redeploy, same as old in-memory behavior).
+STORE = os.environ.get("SHIPCHECK_STORE") or (
+    "/data/shipcheck_state.json" if os.path.isdir("/data")
+    else os.path.join(os.path.dirname(os.path.abspath(__file__)), "shipcheck_state.json"))
+PUBLIC_URL = os.environ.get("SHIPCHECK_PUBLIC_URL", "https://shipcheck-production-5d2a.up.railway.app")
 
 
 class SSRFError(ValueError):
@@ -90,10 +98,46 @@ class RateLimiter:
 RATE = RateLimiter()
 
 # --- 24/7 monitoring (Pro feature) ---
-# ponytail: in-memory store — monitor list resets on redeploy. Move to a JSON file /
-# Railway volume / DB once real paying users exist so their monitors survive deploys.
-MONITORS = {}  # url -> {"webhook": str, "last_ok": bool|None, "last_status": int|None}
+# State lives in one JSON file so paying customers' monitors survive restarts.
+# ponytail: no locking/queuing — single writer (monitor loop) + register endpoint is
+# rare; move to SQLite when concurrent writes or >1 instance exists.
+STATE = {"customers": {}}  # token -> {"webhook": str, "urls": {url: record}}
 _monitor_task = None
+
+
+def _new_monitor(url: str) -> dict:
+    return {"last_ok": None, "last_status": None, "last_checked": None,
+            "checks": 0, "oks": 0}
+
+
+def save_state():
+    tmp = STORE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(STATE, f)
+    os.replace(tmp, STORE)
+
+
+def load_state():
+    try:
+        with open(STORE, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded.get("customers"), dict):
+            STATE["customers"] = loaded["customers"]
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+
+def find_or_create_customer(webhook: str) -> str:
+    for token, c in STATE["customers"].items():
+        if c.get("webhook") == webhook:
+            return token
+    token = secrets.token_urlsafe(8)
+    STATE["customers"][token] = {"webhook": webhook, "urls": {}}
+    return token
+
+
+def total_monitors() -> int:
+    return sum(len(c.get("urls", {})) for c in STATE["customers"].values())
 
 
 def _send_webhook(webhook: str, text: str):
@@ -112,26 +156,37 @@ async def monitor_loop():
     """Every MONITOR_INTERVAL seconds, check each monitored URL; alert webhook on state change."""
     while True:
         await asyncio.sleep(MONITOR_INTERVAL)
-        for url, m in list(MONITORS.items()):
-            try:
-                r = await check(url, screenshot=False, timeout=HARD_TIMEOUT)
-            except SSRFError:
-                continue
-            now_ok = bool(r["ok"])
-            prev_ok = m["last_ok"]
-            m["last_ok"], m["last_status"] = now_ok, r["status"]
-            _log(urlparse(url).hostname, now_ok, r["status"], "monitor", "pro", 0, "monitor")
-            if prev_ok is None:
-                continue  # first check after (re)start — establish baseline, no alert
-            if now_ok != prev_ok:
-                state = "✅ back UP" if now_ok else "🔴 is DOWN"
-                extra = "" if now_ok else f" — status {r['status']}, {r['errors'][:1]}"
-                _send_webhook(m["webhook"], f"shipcheck: `{url}` {state}{extra}")
+        dirty = False
+        for token, c in list(STATE["customers"].items()):
+            for url, rec in list(c.get("urls", {}).items()):
+                try:
+                    r = await check(url, screenshot=False, timeout=HARD_TIMEOUT)
+                except SSRFError:
+                    del c["urls"][url]
+                    dirty = True
+                    continue
+                now_ok = bool(r["ok"])
+                prev_ok = rec["last_ok"]
+                rec.update(last_ok=now_ok, last_status=r["status"],
+                           last_checked=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                           checks=rec.get("checks", 0) + 1,
+                           oks=rec.get("oks", 0) + (1 if now_ok else 0))
+                dirty = True
+                _log(urlparse(url).hostname, now_ok, r["status"], "monitor", "pro", 0, "monitor")
+                if prev_ok is None:
+                    continue  # first check after (re)start — establish baseline, no alert
+                if now_ok != prev_ok:
+                    state = "✅ back UP" if now_ok else "🔴 is DOWN"
+                    extra = "" if now_ok else f" — status {r['status']}, {r['errors'][:1]}"
+                    _send_webhook(c["webhook"], f"shipcheck: `{url}` {state}{extra}")
+        if dirty:
+            save_state()
 
 
 @asynccontextmanager
 async def lifespan(app):
     global _monitor_task
+    load_state()
     _monitor_task = asyncio.create_task(monitor_loop())
     yield
     if _monitor_task:
@@ -271,25 +326,60 @@ async def api_check(req: CheckRequest, request: Request, authorization: str = He
 async def api_monitor(req: MonitorRequest, authorization: str = Header(default="")):
     """Pro-only: register a URL for hourly monitoring + Discord alerts on up/down."""
     if authorization != f"Bearer {API_KEY}":
-        raise HTTPException(402, "monitoring is a Pro feature — get an API key at shipcheck-production-5d2a.up.railway.app")
-    if len(MONITORS) >= MONITOR_CAP:
+        raise HTTPException(402, "monitoring is a Pro feature — get an API key at " + PUBLIC_URL)
+    if total_monitors() >= MONITOR_CAP:
         raise HTTPException(503, f"monitor capacity full ({MONITOR_CAP})")
     try:
         assert_safe_url(req.url)
     except SSRFError as e:
         raise HTTPException(403, f"blocked: {e}")
-    MONITORS[req.url] = {"webhook": req.webhook, "last_ok": None, "last_status": None}
+    token = find_or_create_customer(req.webhook)
+    STATE["customers"][token]["urls"].setdefault(req.url, _new_monitor(req.url))
+    save_state()
     _log(urlparse(req.url).hostname, True, 200, "?", "pro", 0, "monitor_registered")
     return {"registered": req.url, "interval_seconds": MONITOR_INTERVAL,
-            "active_monitors": len(MONITORS)}
+            "active_monitors": total_monitors(),
+            "status_page": f"{PUBLIC_URL}/status/{token}"}
 
 
 @app.get("/monitors")
 async def api_monitors(authorization: str = Header(default="")):
     if authorization != f"Bearer {API_KEY}":
         raise HTTPException(401, "invalid api key")
-    return {"count": len(MONITORS), "urls": {u: {"ok": m["last_ok"], "status": m["last_status"]}
-                                             for u, m in MONITORS.items()}}
+    return {"count": total_monitors(),
+            "urls": {u: {"ok": rec.get("last_ok"), "status": rec.get("last_status")}
+                     for c in STATE["customers"].values()
+                     for u, rec in c.get("urls", {}).items()}}
+
+
+@app.get("/status/{token}", response_class=HTMLResponse)
+async def status_page(token: str):
+    """Public per-customer status page — token is the secret, page needs no login.
+    Ponytail: plain server-rendered HTML, no auth; add real accounts when customers exist."""
+    c = STATE["customers"].get(token)
+    if not c:
+        raise HTTPException(404, "unknown status page")
+    rows = ""
+    for url, rec in c.get("urls", {}).items():
+        ok, st, n, oks, last = rec.get("last_ok"), rec.get("last_status"), rec.get("checks", 0), rec.get("oks", 0), rec.get("last_checked")
+        badge = "✅ UP" if ok else ("🔴 DOWN" if ok is False else "⏳ awaiting first check")
+        up_pct = f"{oks / n * 100:.1f}%" if n else "—"
+        rows += (f"<tr><td>{html.escape(url)}</td><td>{badge}</td>"
+                 f"<td>{html.escape(str(st))}</td><td>{up_pct}</td>"
+                 f"<td>{html.escape(last or '—')}</td></tr>")
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shipcheck status</title>
+<style>
+body {{ background:#0a0a0f; color:#e8e8ed; font:16px/1.6 system-ui,sans-serif; margin:0; padding:32px 20px }}
+h1 {{ font-size:1.3rem }} h1 a {{ color:#4ade80; text-decoration:none }}
+table {{ width:100%; border-collapse:collapse; margin-top:16px; font-size:.9rem }}
+th, td {{ text-align:left; padding:10px 8px; border-bottom:1px solid #26262f }}
+th {{ color:#8b8b96; font-weight:500 }} td {{ word-break:break-all }}
+</style></head><body>
+<h1>⚓ <a href="{PUBLIC_URL}">shipcheck</a> status</h1>
+<table><tr><th>Site</th><th>Status</th><th>Last HTTP</th><th>Uptime</th><th>Last checked (UTC)</th></tr>
+{rows}</table></body></html>"""
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -320,7 +410,18 @@ if __name__ == "__main__":
     rl = RateLimiter()
     assert rl.hit("t", 3) == 2 and rl.hit("t", 3) == 1 and rl.hit("t", 3) == 0
     assert rl.hit("t", 3) < 0
-    print(f"GUARD CHECKS PASSED ({len(blocked)} SSRF cases + rate limiter)", file=sys.stderr)
+    # --- persistence self-check: save → wipe → load round-trip ---
+    t1 = find_or_create_customer("https://discord.com/api/webhooks/1/abc")
+    STATE["customers"][t1]["urls"]["https://x.test"] = _new_monitor("https://x.test")
+    save_state()
+    assert find_or_create_customer("https://discord.com/api/webhooks/1/abc") == t1  # same webhook → same token
+    kept = STATE["customers"]
+    STATE["customers"] = {}
+    load_state()
+    assert STATE["customers"].get(t1, {}).get("urls", {}).get("https://x.test") is not None
+    os.remove(STORE)
+    STATE["customers"] = kept
+    print(f"GUARD CHECKS PASSED ({len(blocked)} SSRF cases + rate limiter + persistence)", file=sys.stderr)
     # --- live check ---
     r = asyncio.run(check("https://example.com", screenshot=False))
     print(json.dumps(r, indent=1))
